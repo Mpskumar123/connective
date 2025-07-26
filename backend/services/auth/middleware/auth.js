@@ -24,7 +24,6 @@ const authenticateUser = async (req, res, next) => {
       role: user.role,
      
     };
-   
 
     next();
   } catch (error) {
