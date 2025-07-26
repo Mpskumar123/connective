@@ -5,53 +5,42 @@ const cors = require("cors");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const morgan = require("morgan");
-const http = require("http");
 const path = require('path');
 const app = express();
 
-dotenv.config();
+// Load environment variables from the root .env file.
+// This path is crucial for a mono-repo setup where .env is at the project root.
+dotenv.config({ path: path.resolve(__dirname, '../../.env') }); // <-- CRITICAL FIX HERE
 
-// Your environment variable checks (as per previous configuration)
+// --- Environment Variable Checks for Auth Service ---
 const requiredEnvVars = [
-    'MONGODB_URI',
-    'GEMINI_API_KEY',
+    'AUTH_DB_URI',
     'JWT_SECRET',
-    'NODE_ENV'
+    'NODE_ENV',
+    'FRONTEND_URL',
+    'EMAIL_USER',
+    'EMAIL_PASS'
 ];
+console.log('✅ Auth Service Startup - AUTH_DB_URI:', process.env.AUTH_DB_URI ? 'Loaded' : 'MISSING!'); // Improved log
 const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
 if (missingEnvVars.length > 0) {
-    console.error('❌ Missing required environment variables:', missingEnvVars.join(', '));
+    console.error(`❌ Auth Service: Missing required environment variables: ${missingEnvVars.join(', ')}`);
     process.exit(1);
 }
-app.use('/uploads', express.static('uploads'))
-// Routes setup
-const profileRoutes = require('./routes/profile');
-const aiRoutes = require('./routes/ai');
-const coursesRoutes = require('./routes/courses');
-const mentorRoutes = require('./routes/mentor');
-const usersRoutes = require('./routes/users');
-const errorHandler = require("./middleware/errorHandler");
-const requestLogger = require("./middleware/requestLogger");
-const projectRoutes = require('./routes/projects');
-const jobsRoute = require('./routes/jobs');
-const eventRoutes = require('./routes/events');
-const workshopRoutes = require('./routes/workshops');
-const chatRoutes = require('./routes/chat');  // Added chat routes
-const ApplicationRoutes=require('./routes/application');
 
-// Security and logging middleware
+// --- Security and Logging Middleware ---
 app.use(helmet());
 app.use(morgan(process.env.NODE_ENV === 'development' ? 'dev' : 'combined'));
 
-// CORS Configuration (Global CORS handling)
-const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',').map(origin => origin.trim());
-
+// --- CORS Configuration (Auth Service specific) ---
+const allowedOrigins = process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(',').map(origin => origin.trim()) : [];
 app.use(cors({
     origin: function (origin, callback) {
-        if (!origin || allowedOrigins.includes(origin)) {
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.includes(origin)) {
             callback(null, true);
         } else {
-            callback(new Error('Not allowed by CORS'));
+            callback(new Error(`Auth Service: Not allowed by CORS - ${origin}`));
         }
     },
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
@@ -59,125 +48,98 @@ app.use(cors({
     credentials: true
 }));
 
-
-// Rate limiting for API routes
+// --- Rate Limiting for API routes ---
 const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000,  // 15 minutes
-    max: 300,  // Limit each IP to 100 requests per windowMs
-    message: "Too many requests from this IP, please try again later"
+    windowMs: 15 * 60 * 1000,
+    max: 200,
+    message: "Too many requests to Auth Service from this IP, please try again later."
 });
-app.use("/api/", limiter);
+app.use("/api/v1/auth/", limiter); // Apply rate limiting specifically to /api/v1/auth routes
 
-// Body Parsers for JSON and URL Encoded Data
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// --- Body Parsers ---
+app.use(express.json({ limit: '5mb' }));
+app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
-// Custom request logging middleware
-app.use(requestLogger);
+// --- Routes Setup ---
+const authRoutes = require('./routes/auth');
+app.use("/api/v1/auth", authRoutes); // All auth routes will be prefixed with /api/v1/auth
 
-// Routes setup
-app.use("/api/profile", profileRoutes);
-app.use("/api/ai", aiRoutes);
-app.use("/api/courses", coursesRoutes);
-app.use("/api/mentor", mentorRoutes);
-app.use("/api/users", usersRoutes);
-app.use('/api/projects', projectRoutes);
-app.use('/api/jobs', jobsRoute);
-app.use('/api/events', eventRoutes);
-app.use('/api/workshops', workshopRoutes);
-app.use('/api/application',ApplicationRoutes);
-app.use('/api/chat', (req, res, next) => {
-    req.io = io;  // Pass io instance to the request object for routes
-    next();
-}, chatRoutes);  // Add chat routes
-
-app.get("/", (req, res) => {
-    res.send("✅ ConnectYou backend is running.");
-});
-
-// Health check endpoint for service monitoring
+// --- Health Check Endpoint ---
 app.get("/health", (req, res) => {
     const status = {
         timestamp: new Date().toISOString(),
-        service: "ConnectYou API",
+        service: "ConnectYou Auth Service",
         status: "OK",
         mongodb: mongoose.connection.readyState === 1 ? "Connected" : "Disconnected",
         uptime: process.uptime(),
         environment: process.env.NODE_ENV,
-        aiService: process.env.GEMINI_API_KEY ? "Configured" : "Not Configured"
     };
     res.json(status);
 });
 
-// MongoDB Connection with retry mechanism
+// --- MongoDB Connection for Auth Service ---
 const connectDB = async (retries = 5) => {
     try {
-        await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/connectyou', {
+        await mongoose.connect(process.env.AUTH_DB_URI, {
             useNewUrlParser: true,
             useUnifiedTopology: true,
+            serverSelectionTimeoutMS: 5000,
+            socketTimeoutMS: 45000
         });
-        console.log("✅ MongoDB Connected");
+        console.log("✅ Auth Service: MongoDB Connected");
     } catch (err) {
         if (retries > 0) {
-            console.log(`❌ MongoDB connection failed. Retrying... (${retries} attempts left)`);
+            console.error(`❌ Auth Service: MongoDB connection failed. Retrying... (${retries} attempts left)`);
             setTimeout(() => connectDB(retries - 1), 5000);
         } else {
-            console.error("❌ MongoDB Connection Error:", err);
+            console.error("❌ Auth Service: MongoDB Connection Error (max retries reached):", err.message);
             process.exit(1);
         }
     }
 };
 
-// Global error handler for the application
+// --- Global Error Handler (for Auth Service) ---
+const errorHandler = require("./middleware/errorHandler");
 app.use(errorHandler);
 
-// Graceful shutdown handling
+// --- Graceful Shutdown Handling ---
 const gracefulShutdown = async () => {
-    console.log('🔄 Received shutdown signal');
+    console.log('🔄 Auth Service: Received shutdown signal');
     try {
         await mongoose.connection.close();
-        console.log('📦 MongoDB connection closed');
+        console.log('📦 Auth Service: MongoDB connection closed');
         process.exit(0);
     } catch (err) {
-        console.error('❌ Error during graceful shutdown:', err);
+        console.error('❌ Auth Service: Error during graceful shutdown:', err);
         process.exit(1);
     }
 };
 
 process.on('SIGTERM', gracefulShutdown);
 process.on('SIGINT', gracefulShutdown);
-process.on('unhandledRejection', (err) => {
-    console.error('Unhandled Promise Rejection:', err);
-    if (process.env.NODE_ENV === 'development') {
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Auth Service: Unhandled Promise Rejection:', reason);
+    if (process.env.NODE_ENV !== 'production') {
         process.exit(1);
     }
 });
-
-// Create HTTP server and initialize Socket.io
-const server = http.createServer(app);
-const io = require('socket.io')(server, {
-    cors: {
-        origin: '*',
-        methods: ['GET', 'POST']
-    }
+process.on('uncaughtException', (err) => {
+    console.error('❌ Auth Service: Uncaught Exception:', err);
+    process.exit(1);
 });
 
-// Initialize the chatSocket function
-const chatSocket = require('./socket/socket');
-chatSocket(io);
-
-// Start server
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
+// --- Start Server ---
+const AUTH_SERVICE_PORT = process.env.AUTH_SERVICE_PORT || 3001;
+const server = app.listen(AUTH_SERVICE_PORT, () => {
     console.log(`
-🚀 Server is running
-📍 PORT: ${PORT}
+🚀 Auth Service is running
+📍 PORT: ${AUTH_SERVICE_PORT}
 🌍 ENV: ${process.env.NODE_ENV}
 ⏰ Time: ${new Date().toLocaleString()}
     `);
 });
 
-// Connect to MongoDB
+// --- Connect to MongoDB ---
 connectDB();
 
 module.exports = { app, server };

@@ -12,7 +12,7 @@ const app = express();
 
 
 // ✅ Load .env from the same directory as server.js
-dotenv.config({ path: path.resolve(__dirname, '.env') });
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 // --- Environment Variable Checks for Auth Service ---
 const requiredEnvVars = [

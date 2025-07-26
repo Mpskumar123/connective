@@ -14,11 +14,16 @@ const userSchema = new mongoose.Schema(
     email: { type: String, required: true, unique: true, trim: true, lowercase: true },
     phone: { type: String, match: [/^\d{10}$/, 'Phone number must be 10 digits'] },
     avatar: { type: String },
-    password: { type: String, required: true, select: true },
+    password: {
+      type: String,
+      required: true, // Password is always required for non-social login
+      select: true
+    },
+    // REMOVED: firebaseUID field as social login is not integrated
     userType: { type: String, enum: ["student", "alumni"], required: true },
     role: { type: String, enum: ["student", "instructor", "admin"], default: "student" },
-    profile: { type: mongoose.Schema.Types.ObjectId, ref: 'Profile' },
-    
+    profile: { type: mongoose.Schema.Types.ObjectId, ref: 'Profile' }, // Note: This coupling will be addressed with Profile Service.
+
     // Password reset fields
     resetPasswordToken: {
       type: String,
@@ -34,6 +39,7 @@ const userSchema = new mongoose.Schema(
 
 // Hash password before saving
 userSchema.pre('save', async function (next) {
+  // Only hash if password field is modified
   if (this.isModified('password')) {
     const salt = await bcrypt.genSalt(10);
     this.password = await bcrypt.hash(this.password, salt);
@@ -46,9 +52,10 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
   return bcrypt.compare(candidatePassword, this.password);
 };
 
+// Define base User model
 const User = mongoose.model("User", userSchema);
 
-// Student Schema
+// Student Schema (Discriminator)
 const studentSchema = new mongoose.Schema({
   university: String,
   branch: {
@@ -67,7 +74,7 @@ const studentSchema = new mongoose.Schema({
 });
 const Student = User.discriminator("student", studentSchema);
 
-// Alumni Schema
+// Alumni Schema (Discriminator)
 const alumniSchema = new mongoose.Schema({
   graduationYear: { type: String, required: true },
   currentCompany: String,
