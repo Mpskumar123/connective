@@ -13,7 +13,7 @@ RUN npm install --production
 COPY . .
 
 # Expose the port the service runs on
-EXPOSE 3001
+EXPOSE 5001
 
 # Command to run the application
 CMD ["node", "server.js"]
