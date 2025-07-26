@@ -5,23 +5,26 @@ services:
   # -------------------- API Gateway Service --------------------
   api-gateway:
     build:
-      context: ./api-gateway # Path to the API Gateway directory
+      context: ./api-gateway
     ports:
-      - "80:80" # Map host port 80 to container port 80 (standard HTTP)
-      - "443:443" # For HTTPS (if you set it up with certs later)
+      - "80:80"
+      - "443:443"
     environment:
       API_GATEWAY_PORT: 80
       AUTH_SERVICE_PORT: ${AUTH_SERVICE_PORT}
       MONOLITH_BACKEND_PORT: ${MONOLITH_BACKEND_PORT}
-      PROFILE_SERVICE_PORT: ${PROFILE_SERVICE_PORT} # Add this
+      PROFILE_SERVICE_PORT: ${PROFILE_SERVICE_PORT}
+      APPLICATION_SERVICE_PORT: ${APPLICATION_SERVICE_PORT} # Add this
       FRONTEND_URL: ${FRONTEND_URL}
-      JWT_SECRET: ${JWT_SECRET} # Passed from root .env (if gateway needs it for pre-auth)
+      JWT_SECRET: ${JWT_SECRET}
     depends_on:
       frontend-web:
         condition: service_started
       auth-service:
         condition: service_started
-      profile-service: # Add this
+      profile-service:
+        condition: service_started
+      application-service: # Add this
         condition: service_started
       monolith-backend:
         condition: service_started
@@ -29,31 +32,27 @@ services:
       - connective-backend-network
 
   # -------------------- Frontend Service --------------------
-  # IMPORTANT: This docker-compose.yaml is in 'backend/'
-  # If frontend is in 'connective/frontend/', it cannot be managed directly here without '..' context
-  # Consider moving this to a parent docker-compose.yaml if you want to manage frontend here.
-  # For now, if frontend runs separately, you can remove this section.
   frontend-web:
     build:
-      context: ../frontend # Path to frontend from backend/
+      context: ../frontend
     ports:
-      - "3000:3000" # Map host port 3000 to container port 3000 (for local dev server or Nginx)
+      - "3000:3000"
     environment:
-      REACT_APP_API_URL: http://localhost:80 # Frontend talks to Gateway on localhost:80
+      REACT_APP_API_URL: http://localhost:80
     networks:
       - connective-backend-network
 
   # -------------------- Auth Service --------------------
   auth-service:
     build:
-      context: ./services/auth # Path to auth-service directory
+      context: ./services/auth
     ports:
-      - "3001:3001" # Expose internal service port for local access/debugging if needed
+      - "${AUTH_SERVICE_PORT}:${AUTH_SERVICE_PORT}"
     environment:
-      AUTH_SERVICE_PORT: 3001
-      AUTH_DB_URI: ${AUTH_DB_URI} # Correctly references root .env
+      AUTH_SERVICE_PORT: ${AUTH_SERVICE_PORT}
+      AUTH_DB_URI: ${AUTH_DB_URI}
       JWT_SECRET: ${JWT_SECRET}
-      NODE_ENV: development
+      NODE_ENV: ${NODE_ENV}
       FRONTEND_URL: ${FRONTEND_URL}
       EMAIL_USER: ${EMAIL_USER}
       EMAIL_PASS: ${EMAIL_PASS}
@@ -66,38 +65,61 @@ services:
   # -------------------- Profile Service --------------------
   profile-service:
     build:
-      context: ./services/profile-service # Path to profile-service directory
+      context: ./services/profile-service
     ports:
-      - "3002:3002" # Expose internal service port
+      - "${PROFILE_SERVICE_PORT}:${PROFILE_SERVICE_PORT}"
     environment:
-      PROFILE_SERVICE_PORT: 3002
-      PROFILE_DB_URI: mongodb://profile-db:27017/connective_profile_db
-      JWT_SECRET: ${JWT_SECRET} # Profile service verifies tokens
-      NODE_ENV: development
+      PROFILE_SERVICE_PORT: ${PROFILE_SERVICE_PORT}
+      PROFILE_DB_URI: ${PROFILE_DB_URI}
+      JWT_SECRET: ${JWT_SECRET}
+      NODE_ENV: ${NODE_ENV}
       FRONTEND_URL: ${FRONTEND_URL}
-      AWS_REGION: ${AWS_REGION} # For S3
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      S3_BUCKET_NAME: ${S3_BUCKET_NAME}
+    volumes:
+      - profile_uploads:/app/uploads # Mount a volume for local uploads
     depends_on:
       profile-db:
         condition: service_healthy
     networks:
       - connective-backend-network
 
-  # -------------------- Monolith Backend (The current 'backend' folder) --------------------
+  # -------------------- Application Service --------------------
+  application-service:
+    build:
+      context: ./services/application-service # Path to application-service directory
+    ports:
+      - "${APPLICATION_SERVICE_PORT}:${APPLICATION_SERVICE_PORT}"
+    environment:
+      APPLICATION_SERVICE_PORT: ${APPLICATION_SERVICE_PORT}
+      APPLICATION_DB_URI: ${APPLICATION_DB_URI}
+      JWT_SECRET: ${JWT_SECRET}
+      NODE_ENV: ${NODE_ENV}
+      FRONTEND_URL: ${FRONTEND_URL}
+      JOBS_SERVICE_URL: http://monolith-backend:${MONOLITH_BACKEND_PORT} # Point to monolith for now
+      PROFILE_SERVICE_URL: http://profile-service:${PROFILE_SERVICE_PORT}
+    volumes: # Add a volume for application service's local resume uploads
+      - application_uploads:/app/uploads
+    depends_on:
+      application-db:
+        condition: service_healthy
+      profile-service: # Application Service needs Profile Service
+        condition: service_started
+      # No direct dependency on jobs-service here in depends_on, as we point to monolith for URL
+    networks:
+      - connective-backend-network
+
+  # -------------------- Monolith Backend --------------------
   monolith-backend:
     build:
-      context: . # Context is the current directory (where docker-compose.yaml resides)
-      dockerfile: Dockerfile # Refers to E:\ConnectYou\connective\backend\Dockerfile
+      context: .
+      dockerfile: Dockerfile
     ports:
-      - "5000:5000"
+      - "${MONOLITH_BACKEND_PORT}:${MONOLITH_BACKEND_PORT}"
     environment:
       MONGODB_URI: ${MONOLITH_DB_URI}
-      PORT: 5000
+      PORT: ${MONOLITH_BACKEND_PORT}
       JWT_SECRET: ${JWT_SECRET}
-      NODE_ENV: development
-      ALLOWED_ORIGINS: ${FRONTEND_URL}
+      NODE_ENV: ${NODE_ENV}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
       GEMINI_API_KEY: ${GEMINI_API_KEY}
     depends_on:
       monolith-db:
@@ -118,10 +140,22 @@ services:
     networks:
       - connective-backend-network
 
-  profile-db: # New database for Profile Service
+  profile-db:
     image: mongo:latest
     volumes:
-      - profile_db_data:/data/db # CRUCIAL FOR PERSISTENCE
+      - profile_db_data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongo --quiet --eval 'db.runCommand(\"ping\").ok' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - connective-backend-network
+
+  application-db:
+    image: mongo:latest
+    volumes:
+      - application_db_data:/data/db
     healthcheck:
       test: ["CMD-SHELL", "mongo --quiet --eval 'db.runCommand(\"ping\").ok' || exit 1"]
       interval: 10s
@@ -145,7 +179,9 @@ services:
 volumes:
   auth_db_data:
   profile_db_data:
+  application_db_data: # New named volume for application service's local uploads
   monolith_db_data:
+  profile_uploads: # Existing named volume for profile service's local uploads
 
 networks:
   connective-backend-network:
